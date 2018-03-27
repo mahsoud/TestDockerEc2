@@ -22,7 +22,6 @@ BEGIN
     {
         Install-Module -Name AWSPowerShell -Force
     }
-
     Import-Module AWSPowerShell
 
     Initialize-AWSDefaults -AccessKey $AccessKey -SecretKey $SecretAccessKey -Region $Region
@@ -31,7 +30,7 @@ BEGIN
 
     [string] $instanceType = 't2.micro'
     [string] $securityGroup = 'mySecGroup'
-    [string] $keyPair = 'myKey'
+    [string] $keyName = 'myKey'
 
     functon New-SecurityGroup
     {
@@ -47,7 +46,7 @@ BEGIN
         }
 
         [string] $myIpRange = '0.0.0.0/0'
-        $groupid = New-EC2SecurityGroup $SecurityGroupName  -Description "Test Security Group"
+        $groupId = New-EC2SecurityGroup $SecurityGroupName  -Description "Test Security Group"
         Get-EC2SecurityGroup -GroupNames $SecurityGroupName
 
         Write-Verbose 'Opening firewall for ping'
@@ -75,7 +74,7 @@ BEGIN
         }
 
         $keyPair = New-EC2KeyPair -KeyName $KeyName
-        $keyFilePath = [IO.Path]::Combine($env:TEMP, "$KeyName.pem")
+        $keyFilePath = [IO.Path]::Combine($PSScriptRoot, "$KeyName.pem")
 
         if ( Test-Path $keyFilePath -PathType Leaf )
         {
@@ -85,10 +84,15 @@ BEGIN
         "$($keyPair.KeyMaterial)" | Out-File -Encoding ascii -FilePath $keyFilePath
         "KeyName: $($keyPair.KeyName)" | Out-File -Encoding ascii -FilePath $keyFilePath -Append
         "KeyFingerprint: $($keyPair.KeyFingerprint)" | Out-File -Encoding ascii -FilePath $keyFilePath -Append
+
+        return $keyPair
     }
 }
 PROCESS
 {
+    New-SecurityGroup -SecurityGroupName $securityGroup
+    $keyPair = New-KeyPair -KeyName $keyName
+    
     [Object[]]$amiObj = Get-EC2Image -Filter @{ Name="name"; Values="ubuntu*" } -Owner amazon
 
     if ($amiObj.Count -lt 1)
@@ -96,10 +100,20 @@ PROCESS
         throw [Exception]::new('Failed to find ubuntu AMI')    
     }
 
-    New-SecurityGroup -SecurityGroupName $securityGroup
-    New-KeyPair -KeyName $keyPair
+    $ec2Instance = New-EC2Instance -ImageId $amiObj[0].ImageId -MinCount 1 -MaxCount 1 -KeyName $keyPair -SecurityGroups $securityGroup -InstanceType $instanceType
 
-    New-EC2Instance -ImageId $amiObj[0].ImageId -MinCount 1 -MaxCount 1 -KeyName $keyPair -SecurityGroups $securityGroup -InstanceType $instanceType
+    $instanceId = $ec2Instance.Instances[0].InstanceId
 
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ((Get-EC2Instance -Filter $instaceFilter).Instances[0].State.Name -ine 'Running')
+    {
+        Write-Verbose -Message "Waiting for instance ""$instanceId"" enter running state."
+        if ($timer.Elapsed -ge [timespan]::FromMinutes(15))
+        {
+            throw [Exception]::new("Timeout exceeded. Instance ""$instanceId"" failed to enter running state.")
+        }
+        Start-Sleep -Seconds 30
+    }
+    $timer.Stop()
 }
 
