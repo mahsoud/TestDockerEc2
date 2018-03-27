@@ -49,7 +49,7 @@ BEGIN
     [string] $securityGroup = 'mySecGroup'
     [string] $keyName = 'myKey'
 
-    functon New-SecurityGroup
+    functon Get-SecurityGroup
     {
         [CmdletBinding(PositionalBinding = $false)]
         param (
@@ -79,7 +79,7 @@ BEGIN
         return $groupId
     }
 
-    function New-KeyPair
+    function Get-KeyPair
     {
         [CmdletBinding(PositionalBinding = $false)]
         param (
@@ -109,8 +109,8 @@ BEGIN
 }
 PROCESS
 {
-    New-SecurityGroup -SecurityGroupName $securityGroup
-    $keyPair = New-KeyPair -KeyName $keyName
+    Get-SecurityGroup -SecurityGroupName $securityGroup
+    $keyPair = Get-KeyPair -KeyName $keyName
     
     [Object[]]$amiObj = Get-EC2Image -Filter @{ Name="name"; Values="ubuntu*" } -Owner amazon
 
@@ -122,7 +122,7 @@ PROCESS
     $ec2Instance = New-EC2Instance -ImageId $amiObj[0].ImageId -MinCount 1 -MaxCount 1 -KeyName $keyPair -SecurityGroups $securityGroup -InstanceType $instanceType
 
     $instanceId = $ec2Instance.Instances[0].InstanceId
-
+    $instaceFilter = @{Name = "instance-id"; Values = $instanceId}
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while ((Get-EC2Instance -Filter $instaceFilter).Instances[0].State.Name -ine 'Running')
     {
@@ -134,5 +134,18 @@ PROCESS
         Start-Sleep -Seconds 30
     }
     $timer.Stop()
-}
 
+    $publicDnsName = (Get-EC2Instance -Filter $instaceFilter).Instances[0].PublicDnsName
+
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Connection -Quiet -ComputerName $publicDnsName -Count 1))
+    {
+        Write-Verbose -Message "Waiting for ping response from ""$publicDnsName""."
+        if ($timer.Elapsed -ge [timespan]::FromMinutes(15))
+        {
+            throw [Exception]::new("Timeout exceeded. ""$publicDnsName"" failed to respond to ping command.")
+        }
+        Start-Sleep -Seconds 10
+    }
+    $timer.Stop()
+}
