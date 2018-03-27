@@ -18,6 +18,23 @@ BEGIN
     $Script:ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
     Set-StrictMode -Version 1
 
+    if ([string]::IsNullOrWhiteSpace($UserName))
+    {
+        throw [ArgumentException]::new("AWS account username must be specified.", 'UserName')
+    }
+    if ([string]::IsNullOrWhiteSpace($AccessKey))
+    {
+        throw [ArgumentException]::new("The access key must be specified.", 'AccessKey')
+    }
+    if ([string]::IsNullOrWhiteSpace($SecretAccessKey))
+    {
+        throw [ArgumentException]::new("The secret access key must be specified.", 'SecretAccessKey')
+    }
+    if ([string]::IsNullOrWhiteSpace($Region))
+    {
+        throw [ArgumentException]::new("The target AWS region must be specified.", 'Region')
+    }
+
     if (-not (Get-Module -Listavailable -Name AWSPowerShell))
     {
         Install-Module -Name AWSPowerShell -Force
@@ -58,6 +75,8 @@ BEGIN
         
         Write-Verbose 'Opening firewall for WinRM'
         Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 5985; ToPort = 5986; IpRanges = @($myIpRange)}
+    
+        return $groupId
     }
 
     function New-KeyPair
