@@ -1,8 +1,9 @@
 #!/bin/bash
+set -e
 
 cd /home
 
-#Docker Install
+# Docker Install
 openssl s_client -connect download.docker.com:443
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu \xenial \stable"
@@ -12,10 +13,10 @@ sudo apt-get install -y docker-ce
 sudo systemctl status docker
 
 
-#Install docker container
+# Install docker container
 docker run --name mynginx1 -P -d nginx
 
-#curl http://localhost:80
+# curl http://localhost:80
 
 
 # Docker file
@@ -24,7 +25,7 @@ RUN apt-get update && apt-get install -y nginx
 
 EOF 
 
-#nginx_config
+# nginx_config
 cat > nginx.conf <<EOF
 user www-data;
 worker_processes auto;
