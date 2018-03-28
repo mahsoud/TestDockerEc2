@@ -2,7 +2,7 @@
 
 cd /home
 
-#Dcocker Install
+#Docker Install
 openssl s_client -connect download.docker.com:443
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu \xenial \stable"
