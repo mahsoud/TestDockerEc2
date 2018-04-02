@@ -12,7 +12,9 @@ param (
     [Parameter()]
     [string] $SecretAccessKey,
     [Parameter()]
-    [string] $Region
+    [string] $Region,
+    [Parameter()]  
+    [int] $InstanceCount = 2
 )
 begin
 {
@@ -49,6 +51,7 @@ begin
     [string] $instanceType = 't2.micro'
     [string] $securityGroup = 'mySecGroup'
     [string] $keyName = 'myKey'
+    [string] $loadBalancerName = 'myElbClassic'
 
     function New-SecurityGroup
     {
@@ -71,6 +74,7 @@ begin
         }
 
         [string] $myIpRange = '0.0.0.0/0'
+        Write-Host 'Setting up new security group.'
 
         New-EC2SecurityGroup -GroupName $SecurityGroupName  -Description "Test Security Group"
         
@@ -104,11 +108,12 @@ begin
             Write-Host "Key ""$KeyName"" exists, skipping."
             return
         }
-        
+
+        Write-Host 'Setting up new key.'
         [Amazon.EC2.Model.KeyPair] $keyPair = New-EC2KeyPair -KeyName $KeyName
+        
         [string] $keyFilePath = [IO.Path]::Combine($PSScriptRoot, "$KeyName.pem")
         Write-Host "Backing up key: ""$keyFilePath""."
-
         if ( Test-Path $keyFilePath -PathType Leaf )
         {
             Write-Host "Removing stale file: ""$keyFilePath""."
@@ -129,6 +134,31 @@ begin
         }
         
         return $amiObj[0].ImageId 
+    }
+
+    function New-LoadBalancer
+    {
+        [CmdletBinding(PositionalBinding = $false)]
+        param (
+            [Parameter(Mandatory = $false)]
+            [string] $LoadBalancerName,
+            [Parameter(Mandatory = $false)]
+            [string] $SecurityGroupName
+        )
+
+        if ([string]::IsNullOrWhiteSpace($LoadBalancerName))
+        {
+            throw [ArgumentException]::new("The name of the load balacer must be specified.", 'Url')
+        }
+        
+        if (Get-ELBLoadBalancer | ? { $_.LoadBalancerName -eq $LoadBalancerName })
+        {
+            Write-Host "Load Balancer ""$LoadBalancerName"" exists, skipping."
+            return
+        }
+
+        [Amazon.ElasticLoadBalancing.Model.Listener] $httpListener = [Amazon.ElasticLoadBalancing.Model.Listener]::new('http', 80, 80)
+        New-ELBLoadBalancer -LoadBalancerName $LoadBalancerName -SecurityGroup $((Get-EC2SecurityGroup -GroupName $SecurityGroupName).GroupId) -Listener $httpListener -Subnet $((Get-EC2Subnet).SubnetId)
     }
 
     function Test-WebPage
@@ -164,57 +194,74 @@ process
 {
     New-SecurityGroup -SecurityGroupName $securityGroup
     New-KeyPair -KeyName $keyName
+    New-LoadBalancer -LoadBalancerName $loadBalancerName -SecurityGroupName $securityGroup
     [ValidateNotNullOrEmpty()][string] $imageId = Get-ImageId
-    
-    [ValidateNotNullOrEmpty()][string] $dockerScript = Get-Content -Raw $(Join-Path "C:\aws\TestDockerEc2" docker.sh)
+        
+    [ValidateNotNullOrEmpty()][string] $dockerScript = Get-Content -Raw $(Join-Path $PSScriptRoot 'docker.sh' -Resolve)
     [ValidateNotNullOrEmpty()][string] $userData = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($dockerScript))
    
-    [Amazon.EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount 1 -MaxCount 1 -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
+    [Amazon.EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount $InstanceCount -MaxCount $InstanceCount -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
 
-    [ValidateNotNullOrEmpty()][string] $instanceId = $ec2Instance.Instances[0].InstanceId
-
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    while ((Get-EC2Instance -InstanceId $instanceId).Instances[0].State.Name -ine 'Running')
+    [ValidateNotNullOrEmpty()][string[]] $instanceId = $ec2Instance.Instances.InstanceId
+    Write-Host 'Registering instance with load balancer.'
+    Register-ELBInstanceWithLoadBalancer -LoadBalancerName $loadBalancerName -Instance $instanceId
+    
+    foreach ($instance in $instanceId)
     {
-        Write-Host "Waiting for instance ""$instanceId"" enter running state."
-        if ($timer.Elapsed -ge [timespan]::FromMinutes(30))
-        {
-            throw [Exception]::new("Timeout exceeded. Instance ""$instanceId"" failed to enter running state.")
-        }
-        Start-Sleep -Seconds 30
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while ((Get-EC2Instance -InstanceId $instance).Instances[0].State.Name -ine 'Running')
+        {
+            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
+            {
+                throw [Exception]::new("Timeout exceeded. Instance ""$instance"" failed to enter running state.")
+            }
+            Write-Host "Waiting for instance ""$instance"" enter running state."
+            Start-Sleep -Seconds 15
+        }
+        Write-Host "Instance ""$instance"" is running."
+        $timer.Stop()
+
+        [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $instance).Instances[0].PublicDnsName
+        Write-Host "Waiting for instance ""$instance"" has DNS name:""$publicDnsName""."
+
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Connection -Quiet -ComputerName $publicDnsName -Count 1))
+        {
+            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
+            {
+                throw [Exception]::new("Timeout exceeded. ""$publicDnsName"" failed to respond to ping command.")
+            }
+            Write-Host "Waiting for ping response from ""$publicDnsName""."
+            Start-Sleep -Seconds 15
+        }
+        $timer.Stop()
+        Write-Host "Instance online: ""$publicDnsName""."
+
+        [ValidateNotNullOrEmpty()][string] $nginxUrl = "http://$publicDnsName"
+        Write-Host "Waiting for web page at ""$nginxUrl""."
+
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (Test-WebPage -Url $nginxUrl)
+        {
+            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
+            {
+                throw [Exception]::new("Timeout exceeded. ""$nginxUrl"" failed to respond.")
+            }
+            Write-Host "Waiting for response from ""$nginxUrl""."
+            Start-Sleep -Seconds 15
+        }
+        $timer.Stop()
+        Write-Host "Web page is available: ""$nginxUrl""."
     }
-    Write-Host "Instance ""$instanceId"" is running."
-    $timer.Stop()
 
-    [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $instanceId).Instances[0].PublicDnsName
-    Write-Host "Waiting for instance ""$instanceId"" has DNS name:""$publicDnsName""."
+    [ValidateNotNullOrEmpty()][string] $LoadBalancerDnsName = (Get-ELBLoadBalancer -LoadBalancerName $LoadBalancerName).DNSName
+    [string] $LoadBalancerUrl = "http://$LoadBalancerDnsName"
 
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    while (-not (Test-Connection -Quiet -ComputerName $publicDnsName -Count 1))
+    Write-Host "Confirming Web page is available via load balancer url: ""$LoadBalancerUrl""."
+    if (-not (Test-WebPage -Url $LoadBalancerUrl))
     {
-        Write-Host "Waiting for ping response from ""$publicDnsName""."
-        if ($timer.Elapsed -ge [timespan]::FromMinutes(15))
-        {
-            throw [Exception]::new("Timeout exceeded. ""$publicDnsName"" failed to respond to ping command.")
-        }
-        Start-Sleep -Seconds 10
+        throw [Exception]::new("Failed to reach the web page via ""$LoadBalancerUrl"".")
     }
-    $timer.Stop()
-    Write-Host "Instance online: ""$publicDnsName""."
 
-    [ValidateNotNullOrEmpty()][string] $nginxUrl = "http://$publicDnsName"
-    Write-Host "Waiting for NGINX page at ""$nginxUrl""."
-
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    while (Test-WebPage -Url $nginxUrl)
-    {
-        Write-Host "Waiting for web container response from ""$nginxUrl""."
-        if ($timer.Elapsed -ge [timespan]::FromMinutes(15))
-        {
-            throw [Exception]::new("Timeout exceeded. ""$nginxUrl"" failed to respond.")
-        }
-        Start-Sleep -Seconds 10
-    }
-    $timer.Stop()
-    Write-Host "Instance online: ""$nginxUrl""."
+    Write-Host 'DONE.'
 }
