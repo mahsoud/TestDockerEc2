@@ -2,6 +2,7 @@
 #Requires -RunAsAdministrator
 
 using namespace System
+using namespace Amazon
 
 [CmdletBinding(PositionalBinding = $false)]
 param (
@@ -12,9 +13,7 @@ param (
     [Parameter()]
     [string] $SecretAccessKey,
     [Parameter()]
-    [string] $Region,
-    [Parameter()]  
-    [int] $InstanceCount = 2
+    [string] $Region
 )
 begin
 {
@@ -52,6 +51,7 @@ begin
     [string] $securityGroup = 'mySecGroup'
     [string] $keyName = 'myKey'
     [string] $loadBalancerName = 'myElbClassic'
+    [int] $InstanceCount = 2
 
     function New-SecurityGroup
     {
@@ -110,7 +110,7 @@ begin
         }
 
         Write-Host 'Setting up new key.'
-        [Amazon.EC2.Model.KeyPair] $keyPair = New-EC2KeyPair -KeyName $KeyName
+        [EC2.Model.KeyPair] $keyPair = New-EC2KeyPair -KeyName $KeyName
         
         [string] $keyFilePath = [IO.Path]::Combine($PSScriptRoot, "$KeyName.pem")
         Write-Host "Backing up key: ""$keyFilePath""."
@@ -157,7 +157,7 @@ begin
             return
         }
 
-        [Amazon.ElasticLoadBalancing.Model.Listener] $httpListener = [Amazon.ElasticLoadBalancing.Model.Listener]::new('http', 80, 80)
+        [ElasticLoadBalancing.Model.Listener] $httpListener = [ElasticLoadBalancing.Model.Listener]::new('http', 80, 80)
         New-ELBLoadBalancer -LoadBalancerName $LoadBalancerName -SecurityGroup $((Get-EC2SecurityGroup -GroupName $SecurityGroupName).GroupId) -Listener $httpListener -Subnet $((Get-EC2Subnet).SubnetId)
     }
 
@@ -200,7 +200,7 @@ process
     [ValidateNotNullOrEmpty()][string] $dockerScript = Get-Content -Raw $(Join-Path $PSScriptRoot 'docker.sh' -Resolve)
     [ValidateNotNullOrEmpty()][string] $userData = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($dockerScript))
    
-    [Amazon.EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount $InstanceCount -MaxCount $InstanceCount -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
+    [EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount $InstanceCount -MaxCount $InstanceCount -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
 
     [ValidateNotNullOrEmpty()][string[]] $instanceId = $ec2Instance.Instances.InstanceId
     Write-Host 'Registering instance with load balancer.'
