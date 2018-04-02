@@ -14,7 +14,7 @@ param (
     [Parameter()]
     [string] $Region
 )
-BEGIN
+begin
 {
     $Script:ErrorActionPreference = [Management.Automation.ActionPreference]::Stop
     Set-StrictMode -Version 1
@@ -35,7 +35,7 @@ BEGIN
     {
         throw [ArgumentException]::new("The target AWS region must be specified.", 'Region')
     }
-    
+
     if (-not (Get-Module -Listavailable -Name AWSPowerShell))
     {
         Install-Module -Name AWSPowerShell -Force
@@ -63,7 +63,7 @@ BEGIN
             throw [ArgumentException]::new("The name of the security group must be specified.", 'SecurityGroupName')
         }
 
-        if (Get-EC2SecurityGroup -GroupName $SecurityGroupName | ? { $_.GroupName -eq $SecurityGroupName })
+        if (Get-EC2SecurityGroup | ? { $_.GroupName -eq $SecurityGroupName })
         {
         
             Write-Host "Security group ""$SecurityGroupName"" exists, skipping."
@@ -78,11 +78,12 @@ BEGIN
         Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "icmp"; FromPort = -1; ToPort = -1; IpRanges = @($myIpRange)}
         
         Write-Host 'Opening firewall for RDP'
-        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 3389; ToPort = 3389; IpRanges = @($myIpRange)}
-        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "udp"; FromPort = 3389; ToPort = 3389; IpRanges = @($myIpRange)}
+        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 22; ToPort = 22; IpRanges = @($myIpRange)}
+        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "udp"; FromPort = 22; ToPort = 22; IpRanges = @($myIpRange)}
         
-        Write-Host 'Opening firewall for WinRM'
-        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 5985; ToPort = 5986; IpRanges = @($myIpRange)}
+        Write-Host 'Opening firewall for HTTP and HTTPS'
+        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 80; ToPort = 80; IpRanges = @($myIpRange)}
+        Grant-EC2SecurityGroupIngress -GroupName $SecurityGroupName -IpPermissions @{IpProtocol = "tcp"; FromPort = 443; ToPort = 443; IpRanges = @($myIpRange)}
     }
 
     function New-KeyPair
@@ -129,14 +130,46 @@ BEGIN
         
         return $amiObj[0].ImageId 
     }
+
+    function Test-WebPage
+    {
+        [CmdletBinding(PositionalBinding = $false)]
+        param (
+            [Parameter(Mandatory = $false)]
+            [string] $Url
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Url))
+        {
+            throw [ArgumentException]::new("The URL of the web page must be specified.", 'Url')
+        }
+
+        try
+        {
+            [Int32] $statusCode = (Invoke-WebRequest -UseBasicParsing -Uri $Url).StatusCode
+            Write-Host "Response: $statusCode"
+            if ($statusCode -eq 200)
+            {
+                return $true
+            }
+            return $false
+        }
+        catch
+        {
+            return $false
+        }
+    }
 }
-PROCESS
+process
 {
     New-SecurityGroup -SecurityGroupName $securityGroup
     New-KeyPair -KeyName $keyName
     [ValidateNotNullOrEmpty()][string] $imageId = Get-ImageId
     
-    [Amazon.EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount 1 -MaxCount 1 -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType
+    [ValidateNotNullOrEmpty()][string] $dockerScript = Get-Content -Raw $(Join-Path "C:\aws\TestDockerEc2" docker.sh)
+    [ValidateNotNullOrEmpty()][string] $userData = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($dockerScript))
+   
+    [Amazon.EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount 1 -MaxCount 1 -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
 
     [ValidateNotNullOrEmpty()][string] $instanceId = $ec2Instance.Instances[0].InstanceId
 
@@ -168,5 +201,20 @@ PROCESS
     }
     $timer.Stop()
     Write-Host "Instance online: ""$publicDnsName""."
-}
 
+    [ValidateNotNullOrEmpty()][string] $nginxUrl = "http://$publicDnsName"
+    Write-Host "Waiting for NGINX page at ""$nginxUrl""."
+
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while (Test-WebPage -Url $nginxUrl)
+    {
+        Write-Host "Waiting for web container response from ""$nginxUrl""."
+        if ($timer.Elapsed -ge [timespan]::FromMinutes(15))
+        {
+            throw [Exception]::new("Timeout exceeded. ""$nginxUrl"" failed to respond.")
+        }
+        Start-Sleep -Seconds 10
+    }
+    $timer.Stop()
+    Write-Host "Instance online: ""$nginxUrl""."
+}
