@@ -246,7 +246,7 @@ process
     [Collections.Generic.List[string]] $instanceDNSNames = [Collections.Generic.List[string]]::new()
 
     $instanceId | % {
-        Write-Host "Waiting for instances to enter running state."
+        Write-Host "Waiting for instance  ""$_"" to enter running state."
         Wait-TaskCompletion -ConditionalStatement "(Get-EC2Instance -InstanceId $_).Instances[0].State.Name -ine 'Running'"
 
         [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $instance).Instances[0].PublicDnsName
