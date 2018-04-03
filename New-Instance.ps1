@@ -154,6 +154,7 @@ begin
             return
         }
 
+        Write-Host "Creating new load balancer with listener on HTTP port 80."
         [ElasticLoadBalancing.Model.Listener] $httpListener = [ElasticLoadBalancing.Model.Listener]::new('http', 80, 80)
         New-ELBLoadBalancer -LoadBalancerName $LoadBalancerName -SecurityGroup $((Get-EC2SecurityGroup -GroupName $SecurityGroupName).GroupId) -Listener $httpListener -Subnet $((Get-EC2Subnet).SubnetId)
     }
@@ -245,11 +246,11 @@ process
     
     [Collections.Generic.List[string]] $instanceDNSNames = [Collections.Generic.List[string]]::new()
 
-    $instanceId | % {
+    $instanceIds | % {
         Write-Host "Waiting for instance  ""$_"" to enter running state."
         Wait-TaskCompletion -ConditionalStatement "(Get-EC2Instance -InstanceId $_).Instances[0].State.Name -ine 'Running'"
 
-        [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $instance).Instances[0].PublicDnsName
+        [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $_).Instances[0].PublicDnsName
         Write-Host "DNS name for instance:""$publicDnsName""."
         $instanceDNSNames.Add($publicDnsName)
     }
