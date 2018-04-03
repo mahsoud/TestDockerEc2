@@ -45,8 +45,6 @@ begin
 
     Initialize-AWSDefaultConfiguration -AccessKey $AccessKey -SecretKey $SecretAccessKey -Region $Region
 
-    Set-Item WSMan:\localhost\Client\TrustedHosts "*" -Force
-
     [string] $instanceType = 't2.micro'
     [string] $securityGroup = 'mySecGroup'
     [string] $keyName = 'myKey'
@@ -68,7 +66,6 @@ begin
 
         if (Get-EC2SecurityGroup | ? { $_.GroupName -eq $SecurityGroupName })
         {
-        
             Write-Host "Security group ""$SecurityGroupName"" exists, skipping."
             return
         }
@@ -161,7 +158,45 @@ begin
         New-ELBLoadBalancer -LoadBalancerName $LoadBalancerName -SecurityGroup $((Get-EC2SecurityGroup -GroupName $SecurityGroupName).GroupId) -Listener $httpListener -Subnet $((Get-EC2Subnet).SubnetId)
     }
 
-    function Test-WebPage
+    function Wait-TaskCompletion
+    {
+        [CmdletBinding(PositionalBinding = $false)]
+        param (
+            [Parameter(Mandatory = $false)]
+            [string] $ConditionalStatement,
+            [Parameter(Mandatory = $false)]
+            [int] $DelayInSeconds = 15,
+            [Parameter(Mandatory = $false)]
+            [int] $TimeoutInMin = 3
+        )
+                
+        if ([string]::IsNullOrWhiteSpace($ConditionalStatement))
+        {
+            throw [ArgumentException]::new("The conditional statement must be specified.", 'ConditionalStatement')
+        }
+        if ($DelayInSeconds -le 0)
+        {
+            throw [ArgumentException]::new("The delay between polls should be greater then 0 seconds.", 'DelayInSeconds')
+        }
+        if ($TimeoutInMin -lt 1)
+        {
+            throw [ArgumentException]::new("The timeout for action should be at least a minute.", 'TimeoutInMin')
+        }
+        
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (Invoke-Expression -Command $ConditionalStatement)
+        {
+            if ($timer.Elapsed -ge [timespan]::FromMinutes($TimeoutInMin))
+            {
+                throw [Exception]::new("Timeout ($TimeoutInMin minutes) exceeded without meeting the preset condition.")
+            }
+            Write-Host "Waiting..."
+            Start-Sleep -Seconds $DelayInSeconds
+        }
+        $timer.Stop()
+    }
+
+    function Test-WebPageOffline
     {
         [CmdletBinding(PositionalBinding = $false)]
         param (
@@ -177,12 +212,12 @@ begin
         try
         {
             [Int32] $statusCode = (Invoke-WebRequest -UseBasicParsing -Uri $Url).StatusCode
-            Write-Host "Response: $statusCode"
+            Write-Host "Got response $statusCode from ""$Url""."
             if ($statusCode -eq 200)
             {
-                return $true
+                return $false
             }
-            return $false
+            return $true
         }
         catch
         {
@@ -195,62 +230,40 @@ process
     New-SecurityGroup -SecurityGroupName $securityGroup
     New-KeyPair -KeyName $keyName
     New-LoadBalancer -LoadBalancerName $loadBalancerName -SecurityGroupName $securityGroup
+
     [ValidateNotNullOrEmpty()][string] $imageId = Get-ImageId
-        
+    
     [ValidateNotNullOrEmpty()][string] $dockerScript = Get-Content -Raw $(Join-Path $PSScriptRoot 'docker.sh' -Resolve)
     [ValidateNotNullOrEmpty()][string] $userData = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($dockerScript))
    
     [EC2.Model.Reservation] $ec2Instance = New-EC2Instance -ImageId $imageId -MinCount $InstanceCount -MaxCount $InstanceCount -KeyName $keyName -SecurityGroups $securityGroup -InstanceType $instanceType -UserData $userData
 
-    [ValidateNotNullOrEmpty()][string[]] $instanceId = $ec2Instance.Instances.InstanceId
-    Write-Host 'Registering instance with load balancer.'
-    Register-ELBInstanceWithLoadBalancer -LoadBalancerName $loadBalancerName -Instance $instanceId
+    [ValidateNotNullOrEmpty()][string[]] $instanceIds = $ec2Instance.Instances.InstanceId
+
+    Write-Host "Registering instances, ""$instanceIds"", with load balancer."
+    Register-ELBInstanceWithLoadBalancer -LoadBalancerName $loadBalancerName -Instance $instanceIds
     
-    foreach ($instance in $instanceId)
-    {
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        while ((Get-EC2Instance -InstanceId $instance).Instances[0].State.Name -ine 'Running')
-        {
-            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
-            {
-                throw [Exception]::new("Timeout exceeded. Instance ""$instance"" failed to enter running state.")
-            }
-            Write-Host "Waiting for instance ""$instance"" enter running state."
-            Start-Sleep -Seconds 15
-        }
-        Write-Host "Instance ""$instance"" is running."
-        $timer.Stop()
+    [Collections.Generic.List[string]] $instanceDNSNames = [Collections.Generic.List[string]]::new()
+
+    $instanceId | % {
+        Write-Host "Waiting for instances to enter running state."
+        Wait-TaskCompletion -ConditionalStatement "(Get-EC2Instance -InstanceId $_).Instances[0].State.Name -ine 'Running'"
 
         [ValidateNotNullOrEmpty()][string] $publicDnsName = (Get-EC2Instance -InstanceId $instance).Instances[0].PublicDnsName
-        Write-Host "Waiting for instance ""$instance"" has DNS name:""$publicDnsName""."
+        Write-Host "DNS name for instance:""$publicDnsName""."
+        $instanceDNSNames.Add($publicDnsName)
+    }
 
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        while (-not (Test-Connection -Quiet -ComputerName $publicDnsName -Count 1))
-        {
-            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
-            {
-                throw [Exception]::new("Timeout exceeded. ""$publicDnsName"" failed to respond to ping command.")
-            }
-            Write-Host "Waiting for ping response from ""$publicDnsName""."
-            Start-Sleep -Seconds 15
-        }
-        $timer.Stop()
-        Write-Host "Instance online: ""$publicDnsName""."
+    $instanceDNSNames | % {
+        Write-Host "Waiting for ping response from ""$_""."
+        Wait-TaskCompletion -ConditionalStatement "-not (Test-Connection -Quiet -ComputerName $_ -Count 1)"
+        Write-Host "Instance is online, ""$_""."
+    }
 
-        [ValidateNotNullOrEmpty()][string] $nginxUrl = "http://$publicDnsName"
-        Write-Host "Waiting for web page at ""$nginxUrl""."
-
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        while (Test-WebPage -Url $nginxUrl)
-        {
-            if ($timer.Elapsed -ge [timespan]::FromMinutes(3))
-            {
-                throw [Exception]::new("Timeout exceeded. ""$nginxUrl"" failed to respond.")
-            }
-            Write-Host "Waiting for response from ""$nginxUrl""."
-            Start-Sleep -Seconds 15
-        }
-        $timer.Stop()
+    $instanceDNSNames | % {
+        [ValidateNotNullOrEmpty()][string] $nginxUrl = "http://$_"
+        Write-Host "Waiting for response from ""$nginxUrl""."
+        Wait-TaskCompletion -ConditionalStatement "Test-WebPageOffline -Url $nginxUrl"
         Write-Host "Web page is available: ""$nginxUrl""."
     }
 
@@ -258,10 +271,9 @@ process
     [string] $LoadBalancerUrl = "http://$LoadBalancerDnsName"
 
     Write-Host "Confirming Web page is available via load balancer url: ""$LoadBalancerUrl""."
-    if (-not (Test-WebPage -Url $LoadBalancerUrl))
+    if (Test-WebPageOffline -Url $LoadBalancerUrl)
     {
         throw [Exception]::new("Failed to reach the web page via ""$LoadBalancerUrl"".")
     }
-
     Write-Host 'DONE.'
 }
